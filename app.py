@@ -33,7 +33,7 @@ if uploaded_file is not None:
 
         split_option = st.selectbox(
             "Split by:",
-            ["Per Row", "Per Month", "Per Year", "Per Newspaper"]
+            ["Per Row", "Per Month", "Per Year", "Per Newspaper", "Per Spatial"]
         )
 
         if st.button("Generate ZIP"):
@@ -44,7 +44,10 @@ if uploaded_file is not None:
                     # Group by date and add counter for duplicates
                     date_counts = {}
                     for _, row in df.iterrows():
-                        date_str = row['date'].strftime('%Y-%m-%d') if pd.notna(row['date']) else 'unknown'
+                        if pd.notna(row['date']):
+                            date_str = row['date'].strftime('%Y-%m-%d')
+                        else:
+                            date_str = 'unknown'
                         date_counts[date_str] = date_counts.get(date_str, 0) + 1
                         count = date_counts[date_str]
                         if count == 1:
@@ -74,13 +77,36 @@ if uploaded_file is not None:
 
                 elif split_option == "Per Newspaper":
                     if 'newspaper' not in df.columns:
-                        st.error("The file must contain a 'newspaper' column for this option.")
+                        st.error(
+                            "The file must contain a 'newspaper' column "
+                            "for this option."
+                        )
                     else:
                         for newspaper, group in df.groupby('newspaper'):
                             # Sanitize filename
                             safe_name = "".join(
                                 c if c.isalnum() or c in (' ', '-', '_') else '_'
                                 for c in str(newspaper)
+                            )
+                            filename = f"{safe_name}.txt"
+                            content = "\n\n---\n\n".join(
+                                str(row['ocr']) if pd.notna(row['ocr']) else ""
+                                for _, row in group.iterrows()
+                            )
+                            zf.writestr(filename, content)
+
+                elif split_option == "Per Spatial":
+                    if 'spatial' not in df.columns:
+                        st.error(
+                            "The file must contain a 'spatial' column "
+                            "for this option."
+                        )
+                    else:
+                        for spatial, group in df.groupby('spatial'):
+                            # Sanitize filename
+                            safe_name = "".join(
+                                c if c.isalnum() or c in (' ', '-', '_') else '_'
+                                for c in str(spatial)
                             )
                             filename = f"{safe_name}.txt"
                             content = "\n\n---\n\n".join(
