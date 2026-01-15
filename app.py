@@ -33,7 +33,14 @@ if uploaded_file is not None:
 
         split_option = st.selectbox(
             "Split by:",
-            ["Per Row", "Per Month", "Per Year", "Per Newspaper", "Per Spatial"]
+            [
+                "Per Row",
+                "Per Month",
+                "Per Year",
+                "Per Newspaper",
+                "Per Year Per Newspaper",
+                "Per Spatial",
+            ]
         )
 
         if st.button("Generate ZIP"):
@@ -89,6 +96,26 @@ if uploaded_file is not None:
                                 for c in str(newspaper)
                             )
                             filename = f"{safe_name}.txt"
+                            content = "\n\n---\n\n".join(
+                                str(row['ocr']) if pd.notna(row['ocr']) else ""
+                                for _, row in group.iterrows()
+                            )
+                            zf.writestr(filename, content)
+
+                elif split_option == "Per Year Per Newspaper":
+                    if 'newspaper' not in df.columns:
+                        st.error(
+                            "The file must contain a 'newspaper' column "
+                            "for this option."
+                        )
+                    else:
+                        for (year, newspaper), group in df.groupby(['year', 'newspaper']):
+                            # Sanitize newspaper name for filename
+                            safe_name = "".join(
+                                c if c.isalnum() or c in (' ', '-', '_') else '_'
+                                for c in str(newspaper)
+                            )
+                            filename = f"{int(year)}_{safe_name}.txt"
                             content = "\n\n---\n\n".join(
                                 str(row['ocr']) if pd.notna(row['ocr']) else ""
                                 for _, row in group.iterrows()
