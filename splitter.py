@@ -1,4 +1,9 @@
-"""Kernlogica voor de Corpus Splitter, los van de Streamlit-interface."""
+"""Kernlogica voor de Corpus Splitter, los van de Streamlit-interface.
+
+Invoer is één tabel: `corpus.tsv` uit de harvest-tool (metadata plus de volledige tekst
+per artikel), of een eigen CSV/TSV met de tekst in een kolom. Uitvoer is een ZIP met een
+map per groep en één tekstbestand per artikel, klaar om in AntConc te openen.
+"""
 
 import csv
 import io
@@ -7,7 +12,9 @@ import zipfile
 
 import pandas as pd
 
-PREFERRED_TEXT_DIRS = ["text", "reocr", "original_ocr"]
+# Tekstkolommen, in de volgorde waarin ze worden aangeboden. `text` is de oorspronkelijke
+# OCR van Delpher, `reocr` de opnieuw herkende tekst; `ocr` komt uit oudere eigen exports.
+PREFERRED_TEXT_COLUMNS = ["text", "reocr", "ocr"]
 
 # Kolommen die als groepering niets opleveren (unieke waarden per artikel).
 NON_GROUPING_COLUMNS = {
@@ -38,127 +45,111 @@ def safe_name(value, fallback="onbekend"):
     if not text or text.lower() in ("nan", "none", "nat"):
         return fallback
     cleaned = "".join(
-        c if (c.isalnum() or c in (" ", "-", "_", ".")) else "_" for c in text
+        character if character.isalnum() or character in " -_" else "_"
+        for character in text
     )
-    cleaned = " ".join(cleaned.split()).strip(" ._-")
-    return cleaned[:80] or fallback
+    cleaned = " ".join(cleaned.split())
+    return cleaned[:60].strip(" .") or fallback
 
 
 def safe_group_names(values):
-    """Veilige mapnamen voor een reeks waarden, zonder dat er twee
-    verschillende waarden in dezelfde map belanden door afkorten."""
-    values = [str(v) for v in values]
-    raw_per_name = {}
+    """Veilige mapnamen die uniek blijven: twee lange titels worden niet één map."""
+    by_name = {}
     for value in values:
-        raw_per_name.setdefault(safe_name(value), set()).add(value)
+        by_name.setdefault(safe_name(value), set()).add(str(value))
 
     resolved = {}
-    for name, raws in raw_per_name.items():
-        if len(raws) == 1:
-            resolved[next(iter(raws))] = name
-            continue
+    for name, raws in by_name.items():
         # deterministisch nummeren, zodat dezelfde invoer hetzelfde oplevert
         for index, raw in enumerate(sorted(raws), start=1):
             resolved[raw] = name if index == 1 else f"{name}_{index}"
-    return [resolved[value] for value in values]
+    return [resolved[str(value)] for value in values]
 
 
-def find_metadata_member(zf):
-    """Pad naar metadata.csv in de zip, ook als die in een submap zit."""
-    candidates = [
-        name
-        for name in zf.namelist()
-        if posixpath.basename(name).lower() == "metadata.csv"
-        and not name.startswith("__MACOSX")
-    ]
-    candidates.sort(key=lambda name: (name.count("/"), len(name)))
-    return candidates[0] if candidates else None
+def read_table(handle, name=""):
+    """Lees corpus.tsv of een eigen CSV/TSV. Tabs bij .tsv, anders komma's.
+
+    De tekst bevat regeleindes en staat daarom tussen aanhalingstekens in de tabel;
+    pandas leest dat goed, een eigen split op tabs niet.
+    """
+    separator = "\t" if str(name).lower().endswith((".tsv", ".tab")) else ","
+    return pd.read_csv(handle, sep=separator, dtype=str, keep_default_na=False)
 
 
-def text_folders(zf, prefix):
-    """Submappen met .txt-bestanden naast metadata.csv, als {map: [paden]}."""
-    found = {}
-    for name in zf.namelist():
-        if not name.lower().endswith(".txt") or name.startswith("__MACOSX"):
-            continue
-        if not name.startswith(prefix):
-            continue
-        rest = name[len(prefix):]
-        if "/" not in rest:
-            continue
-        found.setdefault(rest.split("/", 1)[0], []).append(name)
-    return found
-
-
-def order_text_folders(folders):
-    """Zet text/ vooraan, dan reocr/, dan de rest."""
-    known = [f for f in PREFERRED_TEXT_DIRS if f in folders]
-    return known + sorted(f for f in folders if f not in PREFERRED_TEXT_DIRS)
-
-
-def read_metadata(zf, member):
-    with zf.open(member) as handle:
-        return pd.read_csv(handle, dtype=str, keep_default_na=False)
-
-
-def grouping_columns(meta):
+def text_columns(frame):
+    """Kolommen die tekst kunnen bevatten, bekende namen vooraan."""
+    known = [c for c in PREFERRED_TEXT_COLUMNS if c in frame.columns]
+    if known:
+        return known
+    # Geen bekende naam: alles wat lange tekst bevat is een kandidaat.
     return [
         c
-        for c in meta.columns
-        if c not in NON_GROUPING_COLUMNS and meta[c].nunique() > 1
+        for c in frame.columns
+        if frame[c].astype(str).str.len().max() >= 200
     ]
 
 
-def derived_options(meta):
+def grouping_columns(frame, text_col=None):
+    return [
+        c
+        for c in frame.columns
+        if c not in NON_GROUPING_COLUMNS
+        and c not in PREFERRED_TEXT_COLUMNS
+        and c != text_col
+        and frame[c].nunique() > 1
+    ]
+
+
+def derived_options(frame):
     options = []
-    if "year" in meta.columns or "date" in meta.columns:
+    if "year" in frame.columns or "date" in frame.columns:
         options += ["Decennium", "Jaar"]
-    if "date" in meta.columns:
+    if "date" in frame.columns:
         options.append("Jaar-maand")
     return options
 
 
-def _years(meta):
-    if "year" in meta.columns:
-        years = pd.to_numeric(meta["year"], errors="coerce")
+def _years(frame):
+    if "year" in frame.columns:
+        years = pd.to_numeric(frame["year"], errors="coerce")
         if years.notna().any():
             return years
-    if "date" in meta.columns:
-        return pd.to_datetime(meta["date"], errors="coerce").dt.year
-    return pd.Series([pd.NA] * len(meta))
+    if "date" in frame.columns:
+        return pd.to_datetime(frame["date"], errors="coerce").dt.year
+    return pd.Series([pd.NA] * len(frame))
 
 
-def compute_groups(meta, choice, source_col=None, mapping=None):
-    """Bepaal per metadata-regel de groep (mapnaam), als lijst strings."""
+def compute_groups(frame, choice, source_col=None, mapping=None):
+    """Bepaal per regel de groep (mapnaam), als lijst strings."""
     if choice == "Decennium":
-        values = _years(meta).map(
+        values = _years(frame).map(
             lambda y: f"{int(y) // 10 * 10}s" if pd.notna(y) else "onbekend"
         )
     elif choice == "Jaar":
-        values = _years(meta).map(
+        values = _years(frame).map(
             lambda y: str(int(y)) if pd.notna(y) else "onbekend"
         )
     elif choice == "Jaar-maand":
-        dates = pd.to_datetime(meta["date"], errors="coerce")
+        dates = pd.to_datetime(frame["date"], errors="coerce")
         values = dates.dt.strftime("%Y-%m").fillna("onbekend")
     elif choice == "mapping":
         if not source_col or mapping is None:
             raise ValueError("mapping vereist een source_col en mapping")
-        values = meta[source_col].astype(str).str.strip().map(
+        values = frame[source_col].astype(str).str.strip().map(
             lambda v: mapping.get(v) or "niet-ingedeeld"
         )
     elif choice.startswith("kolom:"):
-        values = meta[choice[len("kolom:"):]]
+        values = frame[choice[len("kolom:"):]]
     else:
         raise ValueError(f"onbekende indeling: {choice}")
     return safe_group_names(values)
 
 
-def unmapped_values(meta, source_col, mapping):
+def unmapped_values(frame, source_col, mapping):
     return sorted(
         {
             v
-            for v in meta[source_col].astype(str).str.strip()
+            for v in frame[source_col].astype(str).str.strip()
             if not mapping.get(v)
         }
     )
@@ -185,32 +176,48 @@ def mapping_template(values):
     return buffer.getvalue()
 
 
-def _overview_csv(meta, groups, text_dir):
-    word_col = None
-    if text_dir == "reocr" and "n_words_reocr" in meta.columns:
-        word_col = "n_words_reocr"
-    elif "n_words_original" in meta.columns:
-        word_col = "n_words_original"
-    has_date = "date" in meta.columns
+def file_names(frame):
+    """Bestandsnaam per regel: uit de kolom `filename`, anders uit de datum.
 
-    frame = meta.copy()
-    frame["_groep"] = groups
+    De harvest-tool zet in `filename` al `JJJJ-MM-DD_krant_artikel-id.txt`, zodat de
+    bestanden op datum sorteren. Namen die twee keer voorkomen krijgen een nummer.
+    """
+    if "filename" in frame.columns:
+        raw = [posixpath.basename(str(v)).strip() for v in frame["filename"]]
+    elif "date" in frame.columns:
+        dates = pd.to_datetime(frame["date"], errors="coerce")
+        raw = [
+            f"{d.strftime('%Y-%m-%d')}.txt" if pd.notna(d) else "onbekend.txt"
+            for d in dates
+        ]
+    else:
+        raw = [f"artikel_{i + 1}.txt" for i in range(len(frame))]
+
+    names, seen = [], {}
+    for name in raw:
+        stem = safe_name(name.removesuffix(".txt"), fallback="artikel")
+        seen[stem] = seen.get(stem, 0) + 1
+        suffix = "" if seen[stem] == 1 else f"_{seen[stem]}"
+        names.append(f"{stem}{suffix}.txt")
+    return names
+
+
+def _overview_csv(frame, groups, text_col):
+    has_date = "date" in frame.columns
+    work = frame.copy()
+    work["_groep"] = groups
+    work["_woorden"] = work[text_col].astype(str).map(lambda t: len(t.split()))
 
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    header = ["map", "artikelen"]
-    if word_col:
-        header += ["woorden", "woorden_per_artikel"]
+    header = ["map", "artikelen", "woorden", "woorden_per_artikel"]
     if has_date:
         header += ["eerste_datum", "laatste_datum"]
     writer.writerow(header)
 
-    for group, rows in frame.groupby("_groep", sort=True):
-        line = [group, len(rows)]
-        if word_col:
-            counts = pd.to_numeric(rows[word_col], errors="coerce").dropna()
-            total = int(counts.sum())
-            line += [total, round(total / len(rows), 1) if len(rows) else 0]
+    for group, rows in work.groupby("_groep", sort=True):
+        total = int(rows["_woorden"].sum())
+        line = [group, len(rows), total, round(total / len(rows), 1) if len(rows) else 0]
         if has_date:
             dates = sorted(d for d in rows["date"].astype(str) if d.strip())
             line += [dates[0] if dates else "", dates[-1] if dates else ""]
@@ -218,33 +225,45 @@ def _overview_csv(meta, groups, text_dir):
     return buffer.getvalue()
 
 
-def build_split_zip(zf, meta, groups, text_dir, folders, source_name="", label=""):
-    """Bouw een ZIP met een map per groep. Geeft (bytes, rapport) terug."""
-    available = {posixpath.basename(n): n for n in folders[text_dir]}
-    frame = meta.copy()
-    frame["_groep"] = groups
+def build_split_zip(frame, groups, text_col, source_name="", label="", merge=False):
+    """Bouw een ZIP met een map per groep. Geeft (bytes, rapport) terug.
+
+    Met merge=True komt er één bestand per groep, met de artikelen achter elkaar
+    gescheiden door een regel met `---` (voor tools die één bestand per groep willen).
+    """
+    work = frame.copy()
+    work["_groep"] = groups
+    work["_bestand"] = file_names(frame)
 
     buffer = io.BytesIO()
-    missing = []
-    written = 0
-    per_group = {}
+    empty, written, per_group = [], 0, {}
 
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out:
-        for _, row in frame.iterrows():
-            base = posixpath.basename(str(row["filename"]))
-            member = available.get(base)
-            if member is None:
-                missing.append(base)
-                continue
-            group = row["_groep"]
-            out.writestr(f"{group}/{base}", zf.read(member))
-            written += 1
-            per_group[group] = per_group.get(group, 0) + 1
+        if merge:
+            for group, rows in work.groupby("_groep", sort=True):
+                texts = [str(t) for t in rows[text_col] if str(t).strip()]
+                empty += [n for n, t in zip(rows["_bestand"], rows[text_col])
+                          if not str(t).strip()]
+                out.writestr(f"{group}.txt", "\n\n---\n\n".join(texts))
+                written += len(texts)
+                per_group[group] = len(texts)
+        else:
+            for _, row in work.iterrows():
+                text = str(row[text_col])
+                if not text.strip():
+                    empty.append(row["_bestand"])
+                    continue
+                group = row["_groep"]
+                out.writestr(f"{group}/{row['_bestand']}", text.encode("utf-8"))
+                written += 1
+                per_group[group] = per_group.get(group, 0) + 1
 
-        out.writestr("_overzicht.csv", _overview_csv(meta, groups, text_dir))
+        out.writestr("_overzicht.csv", _overview_csv(frame, groups, text_col))
 
         meta_out = io.StringIO()
-        frame.to_csv(meta_out, index=False)
+        work.drop(columns=[c for c in text_columns(frame) if c in work.columns]).to_csv(
+            meta_out, index=False
+        )
         out.writestr("_metadata.csv", meta_out.getvalue())
 
         out.writestr(
@@ -252,20 +271,25 @@ def build_split_zip(zf, meta, groups, text_dir, folders, source_name="", label="
             "Deelcorpora gemaakt met de Corpus Splitter\n"
             "==========================================\n\n"
             f"Bron: {source_name}\n"
-            f"Tekstversie: {text_dir}/\n"
+            f"Tekstversie: kolom {text_col}\n"
             f"Ingedeeld op: {label}\n"
-            f"Aantal mappen: {len(per_group)}\n"
-            f"Aantal bestanden: {written}\n"
-            f"Overgeslagen (bestand niet gevonden): {len(missing)}\n\n"
-            "Elke map is een deelcorpus: open zo'n map in AntConc.\n"
-            "_overzicht.csv bevat de aantallen per map.\n"
-            "_metadata.csv is de metadata met een kolom _groep erbij.\n",
+            f"Aantal {'bestanden' if merge else 'mappen'}: {len(per_group)}\n"
+            f"Aantal artikelen: {written}\n"
+            f"Overgeslagen (lege tekst): {len(empty)}\n\n"
+            + (
+                "Elk bestand is een deelcorpus: de artikelen staan achter elkaar,\n"
+                "gescheiden door een regel met ---.\n"
+                if merge
+                else "Elke map is een deelcorpus: open zo'n map in AntConc.\n"
+            )
+            + "_overzicht.csv bevat de aantallen per groep.\n"
+            "_metadata.csv is de metadata (zonder de tekst) met een kolom _groep erbij.\n",
         )
 
     buffer.seek(0)
     report = {
         "written": written,
-        "missing": missing,
+        "empty": empty,
         "groups": per_group,
     }
     return buffer.getvalue(), report
