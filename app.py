@@ -163,10 +163,8 @@ if st.button("Maak ZIP", type="primary"):
         )
     st.session_state["split_zip"] = data
     st.session_state["split_report"] = report
-    st.session_state["split_name"] = (
-        "deelcorpora_"
-        + sp.safe_name(choice_label(choice)).lower().replace(" ", "_")
-        + ".zip"
+    st.session_state["split_name"] = sp.zip_name(
+        choice_label(choice), text_col, source_col, merge, upload.name
     )
 
 if "split_zip" in st.session_state:

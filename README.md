@@ -53,7 +53,7 @@ De tests bouwen zelf een `corpus.tsv`, dus er is geen echte harvest-map nodig.
 Signatuur staat niet in de metadata; die indeling maak je zelf.
 
 1. Kies bij *Map per* de optie **Eigen indeling (mapping-CSV)**.
-2. Kies de kolom die je wilt hergroeperen, meestal `newspaper`.
+2. Kies de kolom die je wilt hergroeperen, meestal **Krant**.
 3. Download de mapping-CSV. Die bevat alle krantentitels uit jóuw corpus en een
    lege kolom `groep`.
 4. Vul `groep` in (bijvoorbeeld *katholiek*, *socialistisch*, *protestants*,

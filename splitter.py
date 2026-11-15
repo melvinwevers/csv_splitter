@@ -13,8 +13,12 @@ import zipfile
 import pandas as pd
 
 # Tekstkolommen, in de volgorde waarin ze worden aangeboden. `text` is de oorspronkelijke
-# OCR van Delpher, `reocr` de opnieuw herkende tekst; `ocr` komt uit oudere eigen exports.
-PREFERRED_TEXT_COLUMNS = ["text", "reocr", "ocr"]
+# OCR van Delpher, `reocr` de opnieuw herkende tekst.
+PREFERRED_TEXT_COLUMNS = ["text", "reocr"]
+
+# Datumkolommen worden niet als losse kolom aangeboden: Decennium, Jaar en Jaar-maand
+# (derived_options) dekken ze, en een map per dag is voor AntConc onbruikbaar.
+DATE_COLUMNS = {"date", "year"}
 
 # Kolommen die als groepering niets opleveren (unieke waarden per artikel).
 NON_GROUPING_COLUMNS = {
@@ -28,19 +32,21 @@ NON_GROUPING_COLUMNS = {
 }
 
 COLUMN_LABELS = {
-    "newspaper": "Krant (newspaper)",
-    "page": "Pagina (page)",
-    "article_type": "Soort (article_type)",
-    "ocr_source": "Tekstbron (ocr_source)",
-    "qa_flag": "QA-markering (qa_flag)",
-    "in_sample": "In steekproef (in_sample)",
-    "year": "Jaar (year)",
-    "date": "Datum (date)",
+    "newspaper": "Krant",
+    "page": "Pagina",
+    "article_type": "Soort artikel",
+    "ocr_source": "Tekstbron",
+    "qa_flag": "QA-markering",
+    "in_sample": "In steekproef",
 }
 
 
-def safe_name(value, fallback="onbekend"):
-    """Maak van een metadata-waarde een veilige map- of bestandsnaam."""
+def safe_name(value, fallback="onbekend", max_len=60):
+    """Maak van een metadata-waarde een veilige map- of bestandsnaam.
+
+    Mapnamen blijven kort (60 tekens); bestandsnamen krijgen meer ruimte, zodat het
+    artikel-id aan het eind van de harvest-naam heel blijft.
+    """
     text = str(value).strip()
     if not text or text.lower() in ("nan", "none", "nat"):
         return fallback
@@ -49,7 +55,7 @@ def safe_name(value, fallback="onbekend"):
         for character in text
     )
     cleaned = " ".join(cleaned.split())
-    return cleaned[:60].strip(" .") or fallback
+    return cleaned[:max_len].strip(" .") or fallback
 
 
 def safe_group_names(values):
@@ -94,6 +100,7 @@ def grouping_columns(frame, text_col=None):
         c
         for c in frame.columns
         if c not in NON_GROUPING_COLUMNS
+        and c not in DATE_COLUMNS
         and c not in PREFERRED_TEXT_COLUMNS
         and c != text_col
         and frame[c].nunique() > 1
@@ -195,11 +202,36 @@ def file_names(frame):
 
     names, seen = [], {}
     for name in raw:
-        stem = safe_name(name.removesuffix(".txt"), fallback="artikel")
+        # 200 tekens: harvest-namen zijn ~80 tekens en mogen niet worden afgekapt,
+        # anders verdwijnt het artikel-id en botsen namen van dezelfde krant en dag.
+        stem = safe_name(name.removesuffix(".txt"), fallback="artikel", max_len=200)
         seen[stem] = seen.get(stem, 0) + 1
         suffix = "" if seen[stem] == 1 else f"_{seen[stem]}"
         names.append(f"{stem}{suffix}.txt")
     return names
+
+
+def zip_name(choice_label, text_col, source_col=None, merge=False, source_name=""):
+    """Naam van de ZIP die de keuze weergeeft, bv. `deelcorpora_decennium_text.zip`.
+
+    Met een eigen indeling staat de hergroepeerde kolom erin
+    (`deelcorpora_eigen-indeling-krant_text.zip`); bij een hernoemd bestand
+    (`wg5-g9.tsv`) komt die naam vooraan.
+    """
+    def part(value):
+        return safe_name(value).lower().replace(" ", "-").replace("_", "-").strip("-")
+
+    if source_col:
+        indeling = "eigen-indeling-" + part(COLUMN_LABELS.get(source_col, source_col))
+    else:
+        indeling = part(choice_label)
+    parts = ["deelcorpora", indeling, part(text_col)]
+    if merge:
+        parts.append("per-groep-1-bestand")
+    stem = posixpath.basename(str(source_name)).rsplit(".", 1)[0]
+    if stem and stem.lower() != "corpus":
+        parts.insert(0, part(stem))
+    return "_".join(parts) + ".zip"
 
 
 def _overview_csv(frame, groups, text_col):

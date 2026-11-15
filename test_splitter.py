@@ -182,7 +182,28 @@ def test_kolommen_met_een_waarde_of_tekst_zijn_geen_indeling():
     assert "article_type" not in columns          # altijd 'artikel'
     assert "text" not in columns and "reocr" not in columns
     assert "n_words_original" not in columns
-    assert "newspaper" in columns and "year" in columns
+    assert "newspaper" in columns
+    # datum en jaar zitten al in Decennium/Jaar/Jaar-maand: geen dubbele opties
+    assert "year" not in columns and "date" not in columns
+
+
+def test_lange_harvest_bestandsnaam_blijft_heel():
+    name = "1967-01-02_het-vrije-volk-democratisch-socialistisc_ddd_010956226_mpeg21_a0236.txt"
+    frame = sp.read_table(io.StringIO(f"filename\ttext\n{name}\thallo\n"), "x.tsv")
+    assert sp.file_names(frame) == [name]
+
+
+def test_zipnaam_geeft_de_keuze_weer():
+    assert sp.zip_name("Decennium", "text") == "deelcorpora_decennium_text.zip"
+    assert sp.zip_name("Jaar-maand", "reocr", merge=True) == (
+        "deelcorpora_jaar-maand_reocr_per-groep-1-bestand.zip"
+    )
+    assert sp.zip_name("Eigen indeling (mapping-CSV)", "text", "newspaper") == (
+        "deelcorpora_eigen-indeling-krant_text.zip"
+    )
+    assert sp.zip_name("Krant", "text", source_name="wg5-g9.tsv") == (
+        "wg5-g9_deelcorpora_krant_text.zip"
+    )
 
 
 def test_mapnaam_kan_niet_buiten_de_map_wijzen():
