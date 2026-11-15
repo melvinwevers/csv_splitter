@@ -29,6 +29,7 @@ NON_GROUPING_COLUMNS = {
     "reocr_flags",
     "n_words_original",
     "n_words_reocr",
+    "qa_flag",          # lege/korte tekst: een controle, geen indeling van het corpus
 }
 
 COLUMN_LABELS = {
@@ -36,7 +37,6 @@ COLUMN_LABELS = {
     "page": "Pagina",
     "article_type": "Soort artikel",
     "ocr_source": "Tekstbron",
-    "qa_flag": "QA-markering",
     "in_sample": "In steekproef",
 }
 
