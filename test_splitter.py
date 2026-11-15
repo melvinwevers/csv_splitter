@@ -1,6 +1,6 @@
 """Tests voor splitter.py. Draai met: pytest, of python test_splitter.py
 
-Bouwt zelf een klein corpus, dus er is geen echte harvest-map nodig.
+Bouwt zelf een corpus.tsv, dus er is geen echte harvest-map nodig.
 """
 
 import csv
@@ -17,88 +17,74 @@ ROWS = [
     ("1951-11-20_het-vrije-volk_a4.txt", "1951-11-20", "1951", "Het vrĳe volk", "2"),
     ("1952-02-02_trouw_a5.txt", "1952-02-02", "1952", "Trouw", "7"),
 ]
+COLUMNS = ["article_id", "filename", "date", "year", "newspaper", "page",
+           "article_type", "n_words_original", "n_words_reocr", "text", "reocr"]
 
 
-def build_corpus(prefix="corpus/", include_reocr=True, drop_from_reocr=1):
-    """Maak een corpus-ZIP in het geheugen, zoals de harvest-tool die oplevert."""
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w") as zf:
-        meta = io.StringIO()
-        writer = csv.writer(meta)
-        writer.writerow(
-            ["article_id", "filename", "date", "year", "newspaper", "page",
-             "article_type", "n_words_original", "n_words_reocr"]
-        )
-        for index, (name, date, year, paper, page) in enumerate(ROWS):
-            writer.writerow(
-                [f"id{index}", name, date, year, paper, page, "artikel", 100, 110]
-            )
-        zf.writestr(f"{prefix}metadata.csv", meta.getvalue())
-
-        for index, (name, *_rest) in enumerate(ROWS):
-            zf.writestr(f"{prefix}text/{name}", f"tekst van artikel {index}\n")
-        if include_reocr:
-            for name, *_rest in ROWS[: len(ROWS) - drop_from_reocr]:
-                zf.writestr(f"{prefix}reocr/{name}", "opnieuw herkend\n")
-    buffer.seek(0)
-    return zipfile.ZipFile(buffer)
+def corpus_tsv(with_reocr=True, empty_rows=()):
+    """corpus.tsv zoals de harvest-tool die oplevert, als tekst."""
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, delimiter="\t", lineterminator="\n")
+    writer.writerow(COLUMNS if with_reocr else COLUMNS[:-1])
+    for index, (name, date, year, paper, page) in enumerate(ROWS):
+        # echte artikelen bevatten regeleindes: die moeten de tabel heel laten
+        text = "" if index in empty_rows else f"Titel {index}\n\ntekst van artikel {index}\n"
+        row = [f"id{index}", name, date, year, paper, page, "artikel", 100, 110, text]
+        if with_reocr:
+            row.append("" if index in empty_rows else f"opnieuw herkend {index}\n")
+        writer.writerow(row)
+    return buffer.getvalue()
 
 
-def load(zf):
-    member = sp.find_metadata_member(zf)
-    prefix = member[: -len("metadata.csv")]
-    return sp.read_metadata(zf, member), sp.text_folders(zf, prefix), prefix
+def load(**kw):
+    return sp.read_table(io.StringIO(corpus_tsv(**kw)), "corpus.tsv")
 
 
-def test_vindt_metadata_in_submap_en_in_de_wortel():
-    for prefix in ("corpus/", "", "a/b/"):
-        zf = build_corpus(prefix)
-        member = sp.find_metadata_member(zf)
-        assert member == f"{prefix}metadata.csv"
-        _meta, folders, _ = load(zf)
-        assert set(folders) == {"text", "reocr"}
-        assert len(folders["text"]) == len(ROWS)
+def test_leest_corpus_tsv_met_regeleindes_in_de_tekst():
+    frame = load()
+    assert len(frame) == len(ROWS)
+    assert list(frame.columns) == COLUMNS
+    assert frame["text"].iloc[0] == "Titel 0\n\ntekst van artikel 0\n"
 
 
-def test_tekstmappen_staan_in_vaste_volgorde():
-    _meta, folders, _ = load(build_corpus())
-    assert sp.order_text_folders(folders) == ["text", "reocr"]
+def test_tekstkolommen_staan_in_vaste_volgorde():
+    assert sp.text_columns(load()) == ["text", "reocr"]
+    assert sp.text_columns(load(with_reocr=False)) == ["text"]
 
 
 def test_indeling_per_decennium_jaar_en_maand():
-    meta, _folders, _ = load(build_corpus())
-    assert sp.compute_groups(meta, "Decennium") == [
+    frame = load()
+    assert sp.compute_groups(frame, "Decennium") == [
         "1930s", "1930s", "1940s", "1950s", "1950s"
     ]
-    assert sp.compute_groups(meta, "Jaar") == [
+    assert sp.compute_groups(frame, "Jaar") == [
         "1930", "1934", "1948", "1951", "1952"
     ]
-    assert sp.compute_groups(meta, "Jaar-maand")[0] == "1930-03"
+    assert sp.compute_groups(frame, "Jaar-maand")[0] == "1930-03"
 
 
 def test_indeling_per_kolom_maakt_namen_veilig():
-    meta, _folders, _ = load(build_corpus())
-    groups = sp.compute_groups(meta, "kolom:newspaper")
+    groups = sp.compute_groups(load(), "kolom:newspaper")
     assert "De tĳd _ dagblad" in groups       # dubbele punt wordt _
     assert groups.count("Trouw") == 2
 
 
 def test_eigen_indeling_met_mapping_csv():
-    meta, _folders, _ = load(build_corpus())
-    template = sp.mapping_template(sorted(set(meta["newspaper"])))
+    frame = load()
+    template = sp.mapping_template(sorted(set(frame["newspaper"])))
     rows = list(csv.reader(io.StringIO(template)))
     assert rows[0] == ["waarde", "groep"]
-    assert len(rows) == 1 + len(set(meta["newspaper"]))
+    assert len(rows) == 1 + len(set(frame["newspaper"]))
 
     mapping = sp.parse_mapping(io.StringIO(
         "waarde,groep\nTrouw,protestants\nHet vrĳe volk,socialistisch\n"
     ))
-    groups = sp.compute_groups(meta, "mapping", "newspaper", mapping)
+    groups = sp.compute_groups(frame, "mapping", "newspaper", mapping)
     assert groups == [
         "niet-ingedeeld", "niet-ingedeeld", "protestants",
         "socialistisch", "protestants",
     ]
-    assert sp.unmapped_values(meta, "newspaper", mapping) == [
+    assert sp.unmapped_values(frame, "newspaper", mapping) == [
         "De Telegraaf", "De tĳd : dagblad"
     ]
 
@@ -119,55 +105,114 @@ def test_lange_titels_komen_niet_in_dezelfde_map():
     assert len(set(names)) == 2
 
 
-def test_zip_bevat_een_map_per_groep_met_originele_inhoud():
-    zf = build_corpus()
-    meta, folders, prefix = load(zf)
-    groups = sp.compute_groups(meta, "Decennium")
+def test_bestandsnamen_komen_uit_de_kolom_filename():
+    frame = load()
+    assert sp.file_names(frame) == [name for name, *_rest in ROWS]
+
+
+def test_bestandsnamen_zonder_filename_komen_uit_de_datum():
+    frame = load().drop(columns=["filename"])
+    frame.loc[1, "date"] = frame.loc[0, "date"]            # zelfde dag: nummeren
+    names = sp.file_names(frame)
+    assert names[0] == "1930-03-04.txt" and names[1] == "1930-03-04_2.txt"
+
+
+def test_zip_bevat_een_map_per_groep_met_de_tekst_uit_de_tabel():
+    frame = load()
+    groups = sp.compute_groups(frame, "Decennium")
     data, report = sp.build_split_zip(
-        zf, meta, groups, "text", folders, source_name="test.zip", label="Decennium"
+        frame, groups, "text", source_name="corpus.tsv", label="Decennium"
     )
     out = zipfile.ZipFile(io.BytesIO(data))
 
     texts = [n for n in out.namelist() if n.endswith(".txt") and not n.startswith("_")]
     assert len(texts) == len(ROWS)
     assert report["written"] == len(ROWS)
-    assert report["missing"] == []
+    assert report["empty"] == []
     assert report["groups"] == {"1930s": 2, "1940s": 1, "1950s": 2}
 
-    # inhoud ongewijzigd
-    name = ROWS[0][0]
-    assert out.read(f"1930s/{name}") == zf.read(f"{prefix}text/{name}")
+    # inhoud ongewijzigd, inclusief de regeleindes
+    assert out.read(f"1930s/{ROWS[0][0]}").decode("utf-8") == frame["text"].iloc[0]
 
     # bijlagen
     assert {"_overzicht.csv", "_metadata.csv", "_LEESMIJ.txt"} <= set(out.namelist())
     overview = list(csv.DictReader(io.StringIO(out.read("_overzicht.csv").decode())))
     assert [r["map"] for r in overview] == ["1930s", "1940s", "1950s"]
     assert overview[0]["artikelen"] == "2"
-    assert overview[0]["woorden"] == "200"
+    assert overview[0]["woorden"] == "12"                  # 6 woorden per artikel
     assert overview[0]["eerste_datum"] == "1930-03-04"
-    assert "_groep" in out.read("_metadata.csv").decode().splitlines()[0]
+
+    # de metadata gaat mee, de tekstkolommen niet (anders staat het corpus er twee keer in)
+    header = out.read("_metadata.csv").decode().splitlines()[0]
+    assert "_groep" in header and "text" not in header.split(",")
 
 
-def test_ontbrekend_bestand_wordt_gemeld_niet_stilgeslikt():
-    zf = build_corpus(drop_from_reocr=2)
-    meta, folders, _ = load(zf)
-    groups = sp.compute_groups(meta, "Jaar")
-    _data, report = sp.build_split_zip(zf, meta, groups, "reocr", folders)
+def test_reocr_kolom_levert_de_andere_tekstversie():
+    frame = load()
+    data, report = sp.build_split_zip(frame, sp.compute_groups(frame, "Jaar"), "reocr")
+    out = zipfile.ZipFile(io.BytesIO(data))
+    assert out.read(f"1930/{ROWS[0][0]}").decode("utf-8") == "opnieuw herkend 0\n"
+    assert report["written"] == len(ROWS)
+    assert "kolom reocr" in out.read("_LEESMIJ.txt").decode()
+
+
+def test_lege_tekst_wordt_gemeld_niet_stilgeslikt():
+    frame = load(empty_rows=(1, 3))
+    groups = sp.compute_groups(frame, "Jaar")
+    _data, report = sp.build_split_zip(frame, groups, "text")
     assert report["written"] == len(ROWS) - 2
-    assert len(report["missing"]) == 2
+    assert report["empty"] == [ROWS[1][0], ROWS[3][0]]
 
 
-def test_kolommen_met_een_waarde_zijn_geen_indeling():
-    meta, _folders, _ = load(build_corpus())
-    assert "article_type" not in sp.grouping_columns(meta)   # altijd 'artikel'
-    assert "newspaper" in sp.grouping_columns(meta)
-    assert "n_words_original" not in sp.grouping_columns(meta)
+def test_samenvoegen_geeft_een_bestand_per_groep():
+    frame = load()
+    groups = sp.compute_groups(frame, "Decennium")
+    data, report = sp.build_split_zip(frame, groups, "text", merge=True)
+    out = zipfile.ZipFile(io.BytesIO(data))
+    assert sorted(n for n in out.namelist() if not n.startswith("_")) == [
+        "1930s.txt", "1940s.txt", "1950s.txt"
+    ]
+    assert "\n---\n" in out.read("1930s.txt").decode("utf-8")
+    assert report["groups"] == {"1930s": 2, "1940s": 1, "1950s": 2}
+
+
+def test_kolommen_met_een_waarde_of_tekst_zijn_geen_indeling():
+    frame = load()
+    columns = sp.grouping_columns(frame, "text")
+    assert "article_type" not in columns          # altijd 'artikel'
+    assert "text" not in columns and "reocr" not in columns
+    assert "n_words_original" not in columns
+    assert "newspaper" in columns
+    # datum en jaar zitten al in Decennium/Jaar/Jaar-maand: geen dubbele opties
+    assert "year" not in columns and "date" not in columns
+
+
+def test_lange_harvest_bestandsnaam_blijft_heel():
+    name = "1967-01-02_het-vrije-volk-democratisch-socialistisc_ddd_010956226_mpeg21_a0236.txt"
+    frame = sp.read_table(io.StringIO(f"filename\ttext\n{name}\thallo\n"), "x.tsv")
+    assert sp.file_names(frame) == [name]
+
+
+def test_zipnaam_geeft_de_keuze_weer():
+    assert sp.zip_name("Decennium", "text") == "deelcorpora_decennium_text.zip"
+    assert sp.zip_name("Jaar-maand", "reocr", merge=True) == (
+        "deelcorpora_jaar-maand_reocr_per-groep-1-bestand.zip"
+    )
+    assert sp.zip_name("Eigen indeling (mapping-CSV)", "text", "newspaper") == (
+        "deelcorpora_eigen-indeling-krant_text.zip"
+    )
+    assert sp.zip_name("Krant", "text", source_name="wg5-g9.tsv") == (
+        "wg5-g9_deelcorpora_krant_text.zip"
+    )
 
 
 def test_mapnaam_kan_niet_buiten_de_map_wijzen():
     assert "/" not in sp.safe_name("../../etc/passwd")
     assert sp.safe_name("") == "onbekend"
     assert sp.safe_name(float("nan")) == "onbekend"
+    assert "/" not in sp.file_names(
+        sp.read_table(io.StringIO("filename\ttext\n../../x.txt\thallo\n"), "x.tsv")
+    )[0]
 
 
 if __name__ == "__main__":
