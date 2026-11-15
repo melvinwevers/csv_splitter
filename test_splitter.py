@@ -182,6 +182,7 @@ def test_kolommen_met_een_waarde_of_tekst_zijn_geen_indeling():
     assert "article_type" not in columns          # altijd 'artikel'
     assert "text" not in columns and "reocr" not in columns
     assert "n_words_original" not in columns
+    assert "qa_flag" not in columns
     assert "newspaper" in columns
     # datum en jaar zitten al in Decennium/Jaar/Jaar-maand: geen dubbele opties
     assert "year" not in columns and "date" not in columns
