@@ -3,12 +3,19 @@
 Invoer is één tabel: `corpus.tsv` uit de harvest-tool (metadata plus de volledige tekst
 per artikel), of een eigen CSV/TSV met de tekst in een kolom. Uitvoer is een ZIP met een
 map per groep en één tekstbestand per artikel, klaar om in AntConc te openen.
+
+Zuinig met geheugen, omdat de app met een hele werkgroep tegelijk op één kleine server
+draait: `read_corpus` bewaart alleen de metadata en het aantal woorden per artikel, niet
+de tekst. `build_split_zip` leest het bestand daarna nog eens regel voor regel en schrijft
+elk artikel meteen in de ZIP.
 """
 
 import csv
 import io
 import posixpath
+import sys
 import zipfile
+from dataclasses import dataclass
 
 import pandas as pd
 
@@ -72,27 +79,70 @@ def safe_group_names(values):
     return [resolved[str(value)] for value in values]
 
 
-def read_table(handle, name=""):
-    """Lees corpus.tsv of een eigen CSV/TSV. Tabs bij .tsv, anders komma's.
+@dataclass
+class Corpus:
+    """Wat er van een geüpload corpus in het geheugen blijft: alles behalve de tekst."""
 
-    De tekst bevat regeleindes en staat daarom tussen aanhalingstekens in de tabel;
-    pandas leest dat goed, een eigen split op tabs niet.
+    meta: pd.DataFrame      # alle kolommen behalve de tekstkolommen, als strings
+    text_cols: list         # tekstkolommen, bekende namen vooraan
+    words: dict             # tekstkolom -> aantal woorden per artikel
+    name: str               # bestandsnaam, bepaalt tab of komma
+
+    def empty_count(self, text_col):
+        return sum(1 for n in self.words[text_col] if n == 0)
+
+
+def _rows(handle, name):
+    """Regels van de tabel, telkens vanaf het begin. Tabs bij .tsv, anders komma's.
+
+    De tekst bevat regeleindes en staat daarom tussen aanhalingstekens; de csv-module
+    leest dat goed, een eigen split op tabs niet. Lege regels worden overgeslagen.
     """
+    csv.field_size_limit(sys.maxsize)
     separator = "\t" if str(name).lower().endswith((".tsv", ".tab")) else ","
-    return pd.read_csv(handle, sep=separator, dtype=str, keep_default_na=False)
+    handle.seek(0)
+    if isinstance(handle, io.TextIOBase):
+        wrapper, text = None, handle
+    else:
+        # utf-8-sig: een eigen CSV uit Excel begint vaak met een BOM
+        wrapper = text = io.TextIOWrapper(handle, encoding="utf-8-sig", newline="")
+    try:
+        for row in csv.reader(text, delimiter=separator):
+            if row:
+                yield row
+    finally:
+        if wrapper is not None:
+            wrapper.detach()    # anders sluit de wrapper ook het geüploade bestand
 
 
-def text_columns(frame):
-    """Kolommen die tekst kunnen bevatten, bekende namen vooraan."""
-    known = [c for c in PREFERRED_TEXT_COLUMNS if c in frame.columns]
-    if known:
-        return known
-    # Geen bekende naam: alles wat lange tekst bevat is een kandidaat.
-    return [
-        c
-        for c in frame.columns
-        if frame[c].astype(str).str.len().max() >= 200
-    ]
+def read_corpus(handle, name=""):
+    """Lees corpus.tsv of een eigen CSV/TSV, zonder de tekst te bewaren."""
+    rows = _rows(handle, name)
+    header = next(rows, None)
+    if header is None:
+        raise ValueError("Het bestand is leeg.")
+    width = len(header)
+
+    known = {i: c for i, c in enumerate(header) if c in PREFERRED_TEXT_COLUMNS}
+    keep = [i for i in range(width) if i not in known]
+    words = {c: [] for c in known.values()}
+    meta_rows = []
+    for row in rows:
+        if len(row) < width:
+            row += [""] * (width - len(row))
+        for i, column in known.items():
+            words[column].append(len(row[i].split()))
+        meta_rows.append([row[i] for i in keep])
+    meta = pd.DataFrame(meta_rows, columns=[header[i] for i in keep], dtype=str)
+
+    text_cols = [c for c in PREFERRED_TEXT_COLUMNS if c in words]
+    if not text_cols:
+        # Geen bekende naam (eigen export): alles wat lange tekst bevat is een kandidaat.
+        text_cols = [c for c in meta.columns if meta[c].str.len().max() >= 200]
+        for column in text_cols:
+            words[column] = [len(v.split()) for v in meta[column]]
+        meta = meta.drop(columns=text_cols)
+    return Corpus(meta=meta, text_cols=text_cols, words=words, name=name)
 
 
 def grouping_columns(frame, text_col=None):
@@ -234,11 +284,16 @@ def zip_name(choice_label, text_col, source_col=None, merge=False, source_name="
     return "_".join(parts) + ".zip"
 
 
-def _overview_csv(frame, groups, text_col):
-    has_date = "date" in frame.columns
-    work = frame.copy()
-    work["_groep"] = groups
-    work["_woorden"] = work[text_col].astype(str).map(lambda t: len(t.split()))
+def _overview_csv(meta, groups, words):
+    has_date = "date" in meta.columns
+    dates = meta["date"] if has_date else [""] * len(meta)
+    stats = {}
+    for group, count, date in zip(groups, words, dates):
+        entry = stats.setdefault(group, [0, 0, []])
+        entry[0] += 1
+        entry[1] += count
+        if date.strip():
+            entry[2].append(date)
 
     buffer = io.StringIO()
     writer = csv.writer(buffer)
@@ -246,56 +301,61 @@ def _overview_csv(frame, groups, text_col):
     if has_date:
         header += ["eerste_datum", "laatste_datum"]
     writer.writerow(header)
-
-    for group, rows in work.groupby("_groep", sort=True):
-        total = int(rows["_woorden"].sum())
-        line = [group, len(rows), total, round(total / len(rows), 1) if len(rows) else 0]
+    for group in sorted(stats):
+        articles, total, group_dates = stats[group]
+        line = [group, articles, total, round(total / articles, 1)]
         if has_date:
-            dates = sorted(d for d in rows["date"].astype(str) if d.strip())
-            line += [dates[0] if dates else "", dates[-1] if dates else ""]
+            group_dates.sort()
+            line += [group_dates[0], group_dates[-1]] if group_dates else ["", ""]
         writer.writerow(line)
     return buffer.getvalue()
 
 
-def build_split_zip(frame, groups, text_col, source_name="", label="", merge=False):
+def build_split_zip(source, corpus, groups, text_col, source_name="", label="", merge=False):
     """Bouw een ZIP met een map per groep. Geeft (bytes, rapport) terug.
+
+    `source` is hetzelfde bestand als waaruit `corpus` gelezen is; het wordt opnieuw
+    gelezen en elk artikel gaat meteen de ZIP in, zodat nooit het hele corpus tegelijk
+    in het geheugen staat.
 
     Met merge=True komt er één bestand per groep, met de artikelen achter elkaar
     gescheiden door een regel met `---` (voor tools die één bestand per groep willen).
     """
-    work = frame.copy()
-    work["_groep"] = groups
-    work["_bestand"] = file_names(frame)
+    meta = corpus.meta
+    names = file_names(meta)
+    rows = _rows(source, corpus.name)
+    column = next(rows).index(text_col)
 
     buffer = io.BytesIO()
-    empty, written, per_group = [], 0, {}
+    empty, written, per_group, merged = [], 0, {}, {}
 
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out:
-        if merge:
-            for group, rows in work.groupby("_groep", sort=True):
-                texts = [str(t) for t in rows[text_col] if str(t).strip()]
-                empty += [n for n, t in zip(rows["_bestand"], rows[text_col])
-                          if not str(t).strip()]
-                out.writestr(f"{group}.txt", "\n\n---\n\n".join(texts))
-                written += len(texts)
-                per_group[group] = len(texts)
-        else:
-            for _, row in work.iterrows():
-                text = str(row[text_col])
-                if not text.strip():
-                    empty.append(row["_bestand"])
-                    continue
-                group = row["_groep"]
-                out.writestr(f"{group}/{row['_bestand']}", text.encode("utf-8"))
-                written += 1
-                per_group[group] = per_group.get(group, 0) + 1
+        count = 0
+        for index, row in enumerate(rows):
+            count += 1
+            if index >= len(meta):
+                raise ValueError("Het bestand is veranderd sinds het is ingelezen.")
+            text = row[column] if column < len(row) else ""
+            if not text.strip():
+                empty.append(names[index])
+                continue
+            group = groups[index]
+            if merge:
+                merged.setdefault(group, []).append(text)
+            else:
+                out.writestr(f"{group}/{names[index]}", text.encode("utf-8"))
+            written += 1
+            per_group[group] = per_group.get(group, 0) + 1
+        if count != len(meta):
+            raise ValueError("Het bestand is veranderd sinds het is ingelezen.")
 
-        out.writestr("_overzicht.csv", _overview_csv(frame, groups, text_col))
+        for group in sorted(merged):
+            out.writestr(f"{group}.txt", "\n\n---\n\n".join(merged.pop(group)))
+
+        out.writestr("_overzicht.csv", _overview_csv(meta, groups, corpus.words[text_col]))
 
         meta_out = io.StringIO()
-        work.drop(columns=[c for c in text_columns(frame) if c in work.columns]).to_csv(
-            meta_out, index=False
-        )
+        meta.assign(_groep=groups, _bestand=names).to_csv(meta_out, index=False)
         out.writestr("_metadata.csv", meta_out.getvalue())
 
         out.writestr(
@@ -318,7 +378,6 @@ def build_split_zip(frame, groups, text_col, source_name="", label="", merge=Fal
             "_metadata.csv is de metadata (zonder de tekst) met een kolom _groep erbij.\n",
         )
 
-    buffer.seek(0)
     report = {
         "written": written,
         "empty": empty,

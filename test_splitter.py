@@ -36,24 +36,45 @@ def corpus_tsv(with_reocr=True, empty_rows=()):
     return buffer.getvalue()
 
 
+def source(**kw):
+    return io.BytesIO(corpus_tsv(**kw).encode("utf-8"))
+
+
 def load(**kw):
-    return sp.read_table(io.StringIO(corpus_tsv(**kw)), "corpus.tsv")
+    """(bestand, corpus): build_split_zip leest hetzelfde bestand nog een keer."""
+    handle = source(**kw)
+    return handle, sp.read_corpus(handle, "corpus.tsv")
 
 
 def test_leest_corpus_tsv_met_regeleindes_in_de_tekst():
-    frame = load()
-    assert len(frame) == len(ROWS)
-    assert list(frame.columns) == COLUMNS
-    assert frame["text"].iloc[0] == "Titel 0\n\ntekst van artikel 0\n"
+    _src, corpus = load()
+    assert len(corpus.meta) == len(ROWS)
+    # de tekst blijft niet in het geheugen, alleen het aantal woorden
+    assert list(corpus.meta.columns) == COLUMNS[:-2]
+    assert corpus.words["text"][0] == 6
+    assert corpus.empty_count("text") == 0
 
 
 def test_tekstkolommen_staan_in_vaste_volgorde():
-    assert sp.text_columns(load()) == ["text", "reocr"]
-    assert sp.text_columns(load(with_reocr=False)) == ["text"]
+    assert load()[1].text_cols == ["text", "reocr"]
+    assert load(with_reocr=False)[1].text_cols == ["text"]
+
+
+def test_eigen_csv_met_bom_en_onbekende_tekstkolom():
+    lang = "woord " * 50
+    handle = io.BytesIO(f"\ufeffdatum,artikel\n1950-01-01,{lang}\n".encode("utf-8"))
+    corpus = sp.read_corpus(handle, "eigen.csv")
+    assert list(corpus.meta.columns) == ["datum"]          # BOM niet in de kolomnaam
+    assert corpus.text_cols == ["artikel"]
+    data, report = sp.build_split_zip(handle, corpus, ["alles"], "artikel")
+    out = zipfile.ZipFile(io.BytesIO(data))
+    assert out.read("alles/artikel_1.txt").decode("utf-8") == lang
+    assert not handle.closed                             # upload blijft bruikbaar
 
 
 def test_indeling_per_decennium_jaar_en_maand():
-    frame = load()
+    src, corpus = load()
+    frame = corpus.meta
     assert sp.compute_groups(frame, "Decennium") == [
         "1930s", "1930s", "1940s", "1950s", "1950s"
     ]
@@ -64,13 +85,14 @@ def test_indeling_per_decennium_jaar_en_maand():
 
 
 def test_indeling_per_kolom_maakt_namen_veilig():
-    groups = sp.compute_groups(load(), "kolom:newspaper")
+    groups = sp.compute_groups(load()[1].meta, "kolom:newspaper")
     assert "De tĳd _ dagblad" in groups       # dubbele punt wordt _
     assert groups.count("Trouw") == 2
 
 
 def test_eigen_indeling_met_mapping_csv():
-    frame = load()
+    src, corpus = load()
+    frame = corpus.meta
     template = sp.mapping_template(sorted(set(frame["newspaper"])))
     rows = list(csv.reader(io.StringIO(template)))
     assert rows[0] == ["waarde", "groep"]
@@ -106,22 +128,24 @@ def test_lange_titels_komen_niet_in_dezelfde_map():
 
 
 def test_bestandsnamen_komen_uit_de_kolom_filename():
-    frame = load()
+    src, corpus = load()
+    frame = corpus.meta
     assert sp.file_names(frame) == [name for name, *_rest in ROWS]
 
 
 def test_bestandsnamen_zonder_filename_komen_uit_de_datum():
-    frame = load().drop(columns=["filename"])
+    frame = load()[1].meta.drop(columns=["filename"])
     frame.loc[1, "date"] = frame.loc[0, "date"]            # zelfde dag: nummeren
     names = sp.file_names(frame)
     assert names[0] == "1930-03-04.txt" and names[1] == "1930-03-04_2.txt"
 
 
 def test_zip_bevat_een_map_per_groep_met_de_tekst_uit_de_tabel():
-    frame = load()
+    src, corpus = load()
+    frame = corpus.meta
     groups = sp.compute_groups(frame, "Decennium")
     data, report = sp.build_split_zip(
-        frame, groups, "text", source_name="corpus.tsv", label="Decennium"
+        src, corpus, groups, "text", source_name="corpus.tsv", label="Decennium"
     )
     out = zipfile.ZipFile(io.BytesIO(data))
 
@@ -132,7 +156,7 @@ def test_zip_bevat_een_map_per_groep_met_de_tekst_uit_de_tabel():
     assert report["groups"] == {"1930s": 2, "1940s": 1, "1950s": 2}
 
     # inhoud ongewijzigd, inclusief de regeleindes
-    assert out.read(f"1930s/{ROWS[0][0]}").decode("utf-8") == frame["text"].iloc[0]
+    assert out.read(f"1930s/{ROWS[0][0]}").decode("utf-8") == "Titel 0\n\ntekst van artikel 0\n"
 
     # bijlagen
     assert {"_overzicht.csv", "_metadata.csv", "_LEESMIJ.txt"} <= set(out.namelist())
@@ -148,8 +172,9 @@ def test_zip_bevat_een_map_per_groep_met_de_tekst_uit_de_tabel():
 
 
 def test_reocr_kolom_levert_de_andere_tekstversie():
-    frame = load()
-    data, report = sp.build_split_zip(frame, sp.compute_groups(frame, "Jaar"), "reocr")
+    src, corpus = load()
+    frame = corpus.meta
+    data, report = sp.build_split_zip(src, corpus, sp.compute_groups(frame, "Jaar"), "reocr")
     out = zipfile.ZipFile(io.BytesIO(data))
     assert out.read(f"1930/{ROWS[0][0]}").decode("utf-8") == "opnieuw herkend 0\n"
     assert report["written"] == len(ROWS)
@@ -157,17 +182,19 @@ def test_reocr_kolom_levert_de_andere_tekstversie():
 
 
 def test_lege_tekst_wordt_gemeld_niet_stilgeslikt():
-    frame = load(empty_rows=(1, 3))
+    src, corpus = load(empty_rows=(1, 3))
+    frame = corpus.meta
     groups = sp.compute_groups(frame, "Jaar")
-    _data, report = sp.build_split_zip(frame, groups, "text")
+    _data, report = sp.build_split_zip(src, corpus, groups, "text")
     assert report["written"] == len(ROWS) - 2
     assert report["empty"] == [ROWS[1][0], ROWS[3][0]]
 
 
 def test_samenvoegen_geeft_een_bestand_per_groep():
-    frame = load()
+    src, corpus = load()
+    frame = corpus.meta
     groups = sp.compute_groups(frame, "Decennium")
-    data, report = sp.build_split_zip(frame, groups, "text", merge=True)
+    data, report = sp.build_split_zip(src, corpus, groups, "text", merge=True)
     out = zipfile.ZipFile(io.BytesIO(data))
     assert sorted(n for n in out.namelist() if not n.startswith("_")) == [
         "1930s.txt", "1940s.txt", "1950s.txt"
@@ -177,7 +204,8 @@ def test_samenvoegen_geeft_een_bestand_per_groep():
 
 
 def test_kolommen_met_een_waarde_of_tekst_zijn_geen_indeling():
-    frame = load()
+    src, corpus = load()
+    frame = corpus.meta
     columns = sp.grouping_columns(frame, "text")
     assert "article_type" not in columns          # altijd 'artikel'
     assert "text" not in columns and "reocr" not in columns
@@ -190,7 +218,7 @@ def test_kolommen_met_een_waarde_of_tekst_zijn_geen_indeling():
 
 def test_lange_harvest_bestandsnaam_blijft_heel():
     name = "1967-01-02_het-vrije-volk-democratisch-socialistisc_ddd_010956226_mpeg21_a0236.txt"
-    frame = sp.read_table(io.StringIO(f"filename\ttext\n{name}\thallo\n"), "x.tsv")
+    frame = sp.read_corpus(io.StringIO(f"filename\ttext\n{name}\thallo\n"), "x.tsv").meta
     assert sp.file_names(frame) == [name]
 
 
@@ -212,7 +240,7 @@ def test_mapnaam_kan_niet_buiten_de_map_wijzen():
     assert sp.safe_name("") == "onbekend"
     assert sp.safe_name(float("nan")) == "onbekend"
     assert "/" not in sp.file_names(
-        sp.read_table(io.StringIO("filename\ttext\n../../x.txt\thallo\n"), "x.tsv")
+        sp.read_corpus(io.StringIO("filename\ttext\n../../x.txt\thallo\n"), "x.tsv").meta
     )[0]
 
 
