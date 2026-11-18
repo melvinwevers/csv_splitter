@@ -37,8 +37,9 @@ De tests bouwen zelf een `corpus.tsv`, dus er is geen echte harvest-map nodig.
 > 3. Kies bij *Welke tekstversie?* de kolom `text` — de oorspronkelijke OCR van
 >    Delpher, de tekst om mee te werken. `reocr` is opnieuw herkende tekst: vaak beter
 >    leesbaar, maar met andere fouten. Citeer en tel woorden op basis van `text`.
-> 4. Kies bij *Map per* de indeling die je nodig hebt, bijvoorbeeld **Decennium** of
->    **Krant**.
+> 4. Kies bij *Map per* de indeling die je nodig hebt, bijvoorbeeld **Decennium**,
+>    **Krant** of **Krant en decennium** (een map per krant per decennium, zoals
+>    `Trouw_1950s`; ook **Krant en jaar**).
 > 5. Klik op *Maak ZIP* en download het resultaat.
 > 6. Pak de ZIP uit. Elke map is een deelcorpus: open zo'n map in AntConc
 >    (*File → Open Dir* in AntConc 3, *Corpus → Add Directory* in AntConc 4).
