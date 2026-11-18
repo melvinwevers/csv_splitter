@@ -18,13 +18,23 @@ upload = st.file_uploader("corpus.tsv (of een eigen CSV/TSV)", type=["tsv", "csv
 if upload is None:
     st.stop()
 
-try:
-    frame = sp.read_table(upload, upload.name)
-except Exception as error:                      # pandas noemt het probleem zelf
-    st.error(f"Dit bestand kon niet worden gelezen: {error}")
-    st.stop()
+# Eén keer inlezen per upload, niet bij elke klik: Streamlit draait dit script opnieuw
+# bij elke wijziging, en het inlezen kost bij een groot corpus het meeste geheugen.
+upload_key = (upload.file_id, upload.name, upload.size)
+if st.session_state.get("corpus_key") != upload_key:
+    for key in ("corpus", "corpus_key", "split_zip", "split_report", "split_name",
+                "split_settings"):
+        st.session_state.pop(key, None)
+    try:
+        st.session_state["corpus"] = sp.read_corpus(upload, upload.name)
+    except Exception as error:                  # de csv-module noemt het probleem zelf
+        st.error(f"Dit bestand kon niet worden gelezen: {error}")
+        st.stop()
+    st.session_state["corpus_key"] = upload_key
 
-available = sp.text_columns(frame)
+corpus = st.session_state["corpus"]
+frame = corpus.meta
+available = corpus.text_cols
 if not available:
     st.error(
         "Geen kolom met tekst gevonden. `corpus.tsv` heeft een kolom `text`; in een "
@@ -55,7 +65,7 @@ if text_col == "reocr":
         "analyse gebruikt, en bekijk `qa_flags.csv` in je corpusmap."
     )
 
-empty = int((frame[text_col].astype(str).str.strip() == "").sum())
+empty = corpus.empty_count(text_col)
 if empty:
     st.caption(f"{empty} artikelen hebben geen tekst in deze kolom en worden overgeslagen.")
 
@@ -151,10 +161,19 @@ merge = st.checkbox(
     ),
 )
 
+# Een ZIP hoort bij precies deze keuzes. Verandert er iets, dan gooien we hem weg:
+# anders blijft per student een oude ZIP in het geheugen van de server staan.
+settings = (text_col, choice, source_col, tuple(sorted((mapping or {}).items())), merge)
+if st.session_state.get("split_settings") != settings:
+    for key in ("split_zip", "split_report", "split_name", "split_settings"):
+        st.session_state.pop(key, None)
+
 if st.button("Maak ZIP", type="primary"):
+    st.session_state.pop("split_zip", None)     # oude ZIP eerst vrijgeven
     with st.spinner("Bestanden maken…"):
         data, report = sp.build_split_zip(
-            frame,
+            upload,
+            corpus,
             groups,
             text_col,
             source_name=upload.name,
@@ -163,6 +182,7 @@ if st.button("Maak ZIP", type="primary"):
         )
     st.session_state["split_zip"] = data
     st.session_state["split_report"] = report
+    st.session_state["split_settings"] = settings
     st.session_state["split_name"] = sp.zip_name(
         choice_label(choice), text_col, source_col, merge, upload.name
     )
