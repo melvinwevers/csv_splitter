@@ -157,12 +157,20 @@ def grouping_columns(frame, text_col=None):
     ]
 
 
+# Combinaties: een map per krant per periode, bv. `Trouw_1950s`. Plat (één niveau), zodat
+# elke map een deelcorpus blijft dat je direct in AntConc opent.
+PERIOD_PER_NEWSPAPER = {"Krant en decennium": "Decennium", "Krant en jaar": "Jaar"}
+
+
 def derived_options(frame):
     options = []
-    if "year" in frame.columns or "date" in frame.columns:
+    has_period = "year" in frame.columns or "date" in frame.columns
+    if has_period:
         options += ["Decennium", "Jaar"]
     if "date" in frame.columns:
         options.append("Jaar-maand")
+    if has_period and "newspaper" in frame.columns and frame["newspaper"].nunique() > 1:
+        options += list(PERIOD_PER_NEWSPAPER)
     return options
 
 
@@ -178,6 +186,12 @@ def _years(frame):
 
 def compute_groups(frame, choice, source_col=None, mapping=None):
     """Bepaal per regel de groep (mapnaam), als lijst strings."""
+    if choice in PERIOD_PER_NEWSPAPER:
+        # Eerst de krantnaam veilig en uniek maken (max. 60 tekens), dan de periode
+        # erachter: zo kan het afkappen van een lange titel de periode nooit wegsnijden.
+        papers = safe_group_names(frame["newspaper"])
+        periods = compute_groups(frame, PERIOD_PER_NEWSPAPER[choice])
+        return [f"{paper}_{period}" for paper, period in zip(papers, periods)]
     if choice == "Decennium":
         values = _years(frame).map(
             lambda y: f"{int(y) // 10 * 10}s" if pd.notna(y) else "onbekend"

@@ -84,6 +84,27 @@ def test_indeling_per_decennium_jaar_en_maand():
     assert sp.compute_groups(frame, "Jaar-maand")[0] == "1930-03"
 
 
+def test_indeling_per_krant_en_periode():
+    frame = load()[1].meta
+    assert sp.compute_groups(frame, "Krant en decennium") == [
+        "De Telegraaf_1930s", "De tĳd _ dagblad_1930s", "Trouw_1940s",
+        "Het vrĳe volk_1950s", "Trouw_1950s",
+    ]
+    assert sp.compute_groups(frame, "Krant en jaar")[4] == "Trouw_1952"
+    assert {"Krant en decennium", "Krant en jaar"} <= set(sp.derived_options(frame))
+
+
+def test_lange_krantnaam_houdt_de_periode_in_de_mapnaam():
+    frame = load()[1].meta.copy()
+    frame["newspaper"] = "Het vrije volk : democratisch-socialistisch dagblad " + "x" * 30
+    groups = sp.compute_groups(frame, "Krant en decennium")
+    assert groups[0].endswith("_1930s") and groups[-1].endswith("_1950s")
+
+
+def test_zipnaam_voor_krant_en_periode():
+    assert sp.zip_name("Krant en jaar", "text") == "deelcorpora_krant-en-jaar_text.zip"
+
+
 def test_indeling_per_kolom_maakt_namen_veilig():
     groups = sp.compute_groups(load()[1].meta, "kolom:newspaper")
     assert "De tĳd _ dagblad" in groups       # dubbele punt wordt _
